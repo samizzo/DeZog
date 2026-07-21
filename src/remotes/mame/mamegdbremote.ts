@@ -330,6 +330,14 @@ export class MameGdbRemote extends DzrpQueuedRemote {
 			// Yes, a Stop Reply Packet which is treated as a notification.
 			// E.g. 'T050a:0000;0b:0100;'
 
+			const msg = this.messageQueue[0];
+			if (msg?.customData.break) {
+				// The stop reply packet is a result of sending a break. The message
+				// is still in the queue so remove it and clear the timeout.
+				this.stopCmdRespTimeout();
+				this.messageQueue.shift();
+			}
+
 			// Call resolve of 'continue'
 			if (this.funcContinueResolve) {
 				const continueHandler = this.funcContinueResolve;
@@ -434,21 +442,16 @@ export class MameGdbRemote extends DzrpQueuedRemote {
 	 * $packet-data#checksum
 	 * The packet is answer with an ACK (NACK) followed by a reply/response.
 	 * @param packetData E.g. 'z0,C000,0' or '\x03' (CTRL_C) for break
-	 * @param withCtrlC Set to true if a break should be sent. A break is
-	 * never sent alone but always in conjunction with another command (e.g. 'g' to red registers).
-	 * in order to get a reply from the gdbstub.
 	 * @returns E.g. 'OK'
 	 */
-	protected async sendPacketData(packetData: string, withCtrlC?: boolean): Promise<string> {
+	protected async sendPacketData(packetData: string): Promise<string> {
 		return new Promise<string>((resolve, reject) => {
 			(async () => {
 				// Calculate checksum
 				const checkSum = this.checksum(packetData);
 				// Construct packet
 				let packet = '$' + packetData + '#' + checkSum;
-				LogTransport.log('>>> MameRemote: Sending ' + (withCtrlC ? 'CTRL-C, ' : '') + packet);
-				if (withCtrlC)
-					packet = CTRL_C + packet;
+				LogTransport.log('>>> MameRemote: Sending ' + packet);
 
 				// Convert to buffer
 				const buffer = Buffer.from(packet);
@@ -456,7 +459,31 @@ export class MameGdbRemote extends DzrpQueuedRemote {
 				const entry = this.putIntoQueue(buffer, this.cmdRespTimeoutTime, resolve, reject);
 				entry.customData = {
 					packet,	// Note: packet is used only for debugging.
-					noReply: (packetData == 'c')
+					noReply: (packetData == 'c'),
+					break: false
+				};
+
+				// Try to send immediately
+				if (this.messageQueue.length == 1)
+					await this.sendNextMessage();
+			})();
+		});
+	}
+
+	/** Sends a break command to MAME.
+	 * This will result in the stub sending back a stop reply packet.
+	 * @returns E.g. 'OK'
+	 */
+	protected async sendBreak(): Promise<string> {
+		return new Promise<string>((resolve, reject) => {
+			(async () => {
+				let packet = CTRL_C;
+				const buffer = Buffer.from(packet);
+				const entry = this.putIntoQueue(buffer, this.cmdRespTimeoutTime, resolve, reject);
+				entry.customData = {
+					packet,	// Note: packet is used only for debugging.
+					noReply: false,
+					break: true
 				};
 
 				// Try to send immediately
@@ -528,8 +555,8 @@ export class MameGdbRemote extends DzrpQueuedRemote {
 			// Get string
 			if (cmdArray.length == 0) {
 				// CTRL-C
-				cmd_name = 'CTRL-C, p0b';
-				response = await this.sendPacketData('p0b', true);	// Command is: read register 0b (PC)
+				cmd_name = 'CTRL-C';
+				response = await this.sendBreak();
 			}
 			else {
 				packetData = cmdArray[0];
@@ -723,7 +750,7 @@ export class MameGdbRemote extends DzrpQueuedRemote {
 	 */
 	public async sendDzrpCmdPause(): Promise<void> {
 		// Send CTRL-C:
-		await this.sendPacketData('p0b', true);	// Command is: read register 0b (PC)
+		await this.sendBreak();
 	}
 
 
